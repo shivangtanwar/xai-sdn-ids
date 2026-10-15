@@ -1,0 +1,5 @@
+variant,benign_impaired_s,benign_sources_hit,sources,attacks_mitigated,mean_time_to_mitigate_s
+Naive (block on label),72.0,3,10.0.0.4 10.0.0.6 10.0.0.8,12/12,5.08
+G1 confidence,10.0,1,10.0.0.4,12/12,5.08
+G1+G2 persistence,10.0,1,10.0.0.4,12/12,5.92
+Full CGRE (G1-G4),10.0,1,10.0.0.4,12/12,5.92
