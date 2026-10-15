@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+data/raw/features_smoke*.csv
+data/raw/labels_smoke.csv
+data/processed/smoke.csv

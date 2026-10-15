@@ -1,0 +1,37 @@
+services:
+  controller:
+    build:
+      context: docker
+      dockerfile: controller.Dockerfile
+    image: xai-sdn-ids/controller
+    container_name: xai-controller
+    environment:
+      - XAI_IDS_MODE=${XAI_IDS_MODE:-detect}   # collect | detect | monitor
+      - XAI_FEATURE_LOG=${XAI_FEATURE_LOG:-/app/data/raw/features_live.csv}
+    volumes:
+      - ./:/app
+    ports:
+      - "8088:8080"   # REST API -> http://localhost:8088/xai/alerts
+    networks: [sdn]
+
+  mininet:
+    build:
+      context: .
+      dockerfile: docker/mininet.Dockerfile
+    image: xai-sdn-ids/mininet
+    container_name: xai-mininet
+    privileged: true
+    init: true
+    environment:
+      - SHELL=/bin/bash
+    volumes:
+      - ./:/app
+      - /lib/modules:/lib/modules:ro
+    depends_on: [controller]
+    networks: [sdn]
+    tty: true
+    stdin_open: true
+
+networks:
+  sdn:
+    driver: bridge
