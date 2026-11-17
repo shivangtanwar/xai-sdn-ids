@@ -12,6 +12,7 @@ when confidence, persistence, explanation-consistency and asset-safety condition
 - Plan & architecture: [`docs/00_PROJECT_PLAN.md`](docs/00_PROJECT_PLAN.md)
 - Phase 1–3 report: [`docs/report/phase1-3_report.md`](docs/report/phase1-3_report.md)
 - Literature review (2020–2026, verified): [`docs/research/literature_review.md`](docs/research/literature_review.md)
+- Ryu vs OpenDaylight comparison: [`docs/ODL_COMPARISON.md`](docs/ODL_COMPARISON.md)
 
 ## Quick start
 
@@ -54,4 +55,6 @@ docker run --rm -v "$PWD":/app -w /app xai-sdn-ids/controller python -m unittest
 | `dashboard/` | live dashboard: FastAPI backend (SSE) + single-page frontend |
 | `traffic/live_runner.py` | always-on testbed with an internal attack-launch API |
 | `docker-compose.live.yml` | always-on stack: controller + testbed + dashboard |
+| `ids/odl.py`, `ids/odl_engine.py` | the same IDS driven by OpenDaylight over RESTCONF |
+| `docker-compose.compare.yml` | dual-controller stack (Ryu vs ODL) for the comparison |
 | `docs/` | plan, report, literature review, diagrams |

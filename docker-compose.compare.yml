@@ -1,0 +1,77 @@
+# Dual-controller comparison stack: the same Mininet data plane, with either Ryu or
+# OpenDaylight attached as the control plane.
+#
+#   docker compose -f docker-compose.compare.yml up -d --build
+#   docker exec xai-mininet python3 /app/topology/topo.py --controller odl --port 6653
+#
+# The switch fabric is identical in both arms; only the controller changes. That is what
+# makes the comparison fair: same topology, same hosts, same traffic generators, same
+# Random Forest / SHAP / CGRE code. Only the southbound plumbing differs.
+name: xai-compare
+
+services:
+  ryu:
+    build:
+      context: docker
+      dockerfile: controller.Dockerfile
+    image: xai-sdn-ids/controller
+    container_name: cmp-ryu
+    environment:
+      - XAI_IDS_MODE=detect
+      - XAI_FEATURE_LOG=off
+    volumes:
+      - ./:/app
+    networks: [sdn]
+
+  odl:
+    build:
+      context: .
+      dockerfile: docker/odl.Dockerfile
+    image: xai-sdn-ids/odl
+    container_name: cmp-odl
+    # ODL is memory-hungry; the default heap assumes a larger host than a laptop.
+    environment:
+      - JAVA_MAX_MEM=1g
+    volumes:
+      - odl-data:/opt/opendaylight/data
+    networks: [sdn]
+
+  # The XAI-IDS pipeline driven by ODL instead of Ryu (RESTCONF polling + sal-flow RPCs).
+  # Same detector, same explainer, same gates as the Ryu app.
+  odl-ids:
+    image: xai-sdn-ids/controller
+    container_name: cmp-odl-ids
+    environment:
+      - ODL_URL=http://odl:8182
+      - ODL_USER=admin
+      - ODL_PASSWORD=admin
+      - XAI_IDS_MODE=detect
+    command: ["python", "-m", "ids.odl_engine", "--odl", "http://odl:8182", "--api-port", "8080"]
+    volumes:
+      - ./:/app
+    depends_on: [odl]
+    networks: [sdn]
+
+  mininet:
+    build:
+      context: .
+      dockerfile: docker/mininet.Dockerfile
+    image: xai-sdn-ids/mininet
+    container_name: cmp-mininet
+    privileged: true
+    init: true
+    environment:
+      - SHELL=/bin/bash
+    volumes:
+      - ./:/app
+      - /lib/modules:/lib/modules:ro
+    networks: [sdn]
+    tty: true
+    stdin_open: true
+
+networks:
+  sdn:
+    driver: bridge
+
+volumes:
+  odl-data:
