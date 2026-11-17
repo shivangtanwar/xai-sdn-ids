@@ -10,12 +10,14 @@ builds per-source features, and (depending on XAI_IDS_MODE):
     collect - only logs features (dataset creation)
     monitor - detects + explains, logs decisions, never touches the network
     detect  - full closed loop: detect -> explain -> confidence gates -> mitigate
+
+Every round is also kept in memory (last 15 min) and exposed over REST for the dashboard.
 """
 import csv
 import json
 import os
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 
 from ryu.app.wsgi import ControllerBase, WSGIApplication, route
 from ryu.base import app_manager
@@ -49,7 +51,10 @@ class XaiIdsApp(app_manager.RyuApp):
         self.extractor = FeatureExtractor(C.POLL_INTERVAL)
         self.engine = ResponseEngine()
         self.first_flag = {}                   # src -> ts of first malicious window
-        self.recent = []                       # recent audit entries for the REST API
+        self.decisions = deque(maxlen=600)     # analysed attack-class windows (REST/dashboard)
+        self.rounds = deque(maxlen=450)        # per-round host snapshots, 15 min at 2 s
+        self.latest = {}                       # src -> last window's features and prediction
+        self.started = time.time()
 
         self.detector = self.explainer = None
         if self.mode != "collect":
@@ -58,12 +63,14 @@ class XaiIdsApp(app_manager.RyuApp):
             self.detector = Detector()
             self.explainer = Explainer(self.detector)
 
-        os.makedirs(os.path.dirname(C.FEATURE_LOG), exist_ok=True)
         os.makedirs(os.path.dirname(C.AUDIT_LOG), exist_ok=True)
-        self._feature_file = open(C.FEATURE_LOG, "a", newline="")
-        self._feature_csv = csv.writer(self._feature_file)
-        if self._feature_file.tell() == 0:
-            self._feature_csv.writerow(["ts", "src_ip", "dpid"] + C.FEATURES)
+        self._feature_file = self._feature_csv = None
+        if C.FEATURE_LOG != "off":            # long-running deployments disable the CSV
+            os.makedirs(os.path.dirname(C.FEATURE_LOG), exist_ok=True)
+            self._feature_file = open(C.FEATURE_LOG, "a", newline="")
+            self._feature_csv = csv.writer(self._feature_file)
+            if self._feature_file.tell() == 0:
+                self._feature_csv.writerow(["ts", "src_ip", "dpid"] + C.FEATURES)
 
         kwargs["wsgi"].register(XaiIdsRestApi, {APP_NAME: self})
         self.logger.info("XAI-IDS started in %s mode", self.mode)
@@ -176,25 +183,45 @@ class XaiIdsApp(app_manager.RyuApp):
         records, self.stats_buffer = self.stats_buffer, []
         now = time.time()
         windows = self.extractor.compute(records)
+        hosts = {}
         for src, w in windows.items():
             feats = w["features"]
             if feats["pkt_rate"] <= 0 and feats["new_flows"] == 0:
                 continue
-            self._feature_csv.writerow([f"{now:.3f}", src, w["dpid"]] +
-                                       [f"{feats[f]:.4f}" for f in C.FEATURES])
+            if self._feature_csv is not None:
+                self._feature_csv.writerow([f"{now:.3f}", src, w["dpid"]] +
+                                           [f"{feats[f]:.4f}" for f in C.FEATURES])
+            label, prob = "idle", None
             if self.detector is not None and feats["pkt_rate"] >= C.MIN_PKT_RATE:
-                self._analyse(now, src, w["dpid"], feats)
-        self._feature_file.flush()
+                label, prob = self._analyse(now, src, w["dpid"], feats)
+            hosts[src] = {"pkt_rate": round(feats["pkt_rate"], 1),
+                          "byte_rate": round(feats["byte_rate"], 1),
+                          "label": label, "prob": prob}
+        if self._feature_file is not None:
+            self._feature_file.flush()
+
+        known = set(hosts) | set(self.extractor.inbound) | set(self.src_dpids)
+        for ip in known:
+            h = hosts.setdefault(ip, {"pkt_rate": 0.0, "byte_rate": 0.0, "label": "idle", "prob": None})
+            h["in_rate"] = round(self.extractor.inbound.get(ip, 0.0), 1)
+            h["state"] = self.engine.current_action(ip, now)
+        self.rounds.append({
+            "ts": round(now, 3), "mode": self.mode, "hosts": hosts,
+            "flows": {str(d): n for d, n in self.extractor.flows_per_switch.items()},
+        })
 
     # ------------------------------------------------------------------ detection
     def _analyse(self, now, src, dpid, feats):
+        """Detect -> explain -> gate -> (maybe) mitigate one source window.
+        Returns (label, probability) for the round snapshot."""
         t0 = time.perf_counter()
         label, prob, probs, x = self.detector.predict(feats)
         t_pred = time.perf_counter()
+        self.latest[src] = {"ts": now, "features": feats, "label": label, "prob": prob, "probs": probs}
         if label == "benign":
             self.engine.decide(src, label, prob, [], now)
             self.first_flag.pop(src, None)
-            return
+            return label, round(prob, 4)
         top = self.explainer.explain(x, label, C.TOP_K)
         t_expl = time.perf_counter()
         self.first_flag.setdefault(src, now)
@@ -219,11 +246,12 @@ class XaiIdsApp(app_manager.RyuApp):
             "mitigation_ts": t_mit,
         }
         self._audit(entry)
+        return label, round(prob, 4)
 
     def _audit(self, entry):
         with open(C.AUDIT_LOG, "a") as f:
             f.write(json.dumps(entry) + "\n")
-        self.recent = (self.recent + [entry])[-200:]
+        self.decisions.append(entry)
         if entry["action"] != NONE:
             why = ", ".join(f"{e['feature']}={e['value']:.1f}" for e in entry["explanation"])
             self.logger.warning("[%s] %s -> %s (p=%.2f) because %s | %s",
@@ -265,11 +293,35 @@ class XaiIdsApp(app_manager.RyuApp):
                                           out_group=ofp.OFPG_ANY, match=match))
         self.engine.active.pop(src, None)
 
+    def explain_host(self, ip):
+        """Full pipeline view of a host's latest analysed window (for the dashboard inspector)."""
+        last = self.latest.get(ip)
+        if last is None or self.explainer is None:
+            return None
+        x = self.detector.vectorize(last["features"])
+        sv = self.explainer.class_shap(x, last["label"])
+        decision = next((d for d in reversed(self.decisions)
+                         if d["src_ip"] == ip and d["ts"] == last["ts"]), None)
+        return {
+            "ip": ip, "ts": last["ts"], "label": last["label"], "prob": round(last["prob"], 4),
+            "probs": {k: round(v, 4) for k, v in last["probs"].items()},
+            "features": {k: round(v, 3) for k, v in last["features"].items()},
+            "shap": {f: round(float(v), 4) for f, v in zip(self.detector.features, sv)},
+            "signature": sorted(C.SIGNATURES.get(last["label"], [])),
+            "decision": decision,
+            "state": self.engine.current_action(ip),
+        }
+
 
 class XaiIdsRestApi(ControllerBase):
     """GET  /xai/alerts             recent decisions with explanations
        GET  /xai/mitigations        currently active mitigations
-       DELETE /xai/mitigations/{ip} operator override: release a source"""
+       DELETE /xai/mitigations/{ip} operator override: release a source
+       GET  /xai/status             mode, switches, uptime, thresholds
+       GET  /xai/rounds?since=ts    per-round host snapshots
+       GET  /xai/decisions?since=ts analysed attack-class windows
+       GET  /xai/explain/{ip}       features, probabilities, SHAP, gates of the latest window
+       POST /xai/mode               {"mode": "detect" | "monitor"}"""
 
     def __init__(self, req, link, data, **config):
         super().__init__(req, link, data, **config)
@@ -282,7 +334,7 @@ class XaiIdsRestApi(ControllerBase):
 
     @route("xai", "/xai/alerts", methods=["GET"])
     def alerts(self, req, **kwargs):
-        return self._json([e for e in self.app.recent if e["action"] != NONE][-50:])
+        return self._json([e for e in self.app.decisions if e["action"] != NONE][-50:])
 
     @route("xai", "/xai/mitigations", methods=["GET"])
     def mitigations(self, req, **kwargs):
@@ -294,3 +346,49 @@ class XaiIdsRestApi(ControllerBase):
     def release(self, req, ip, **kwargs):
         self.app.release(ip)
         return self._json({"released": ip})
+
+    @staticmethod
+    def _since(req):
+        try:
+            return float(req.GET.get("since", 0))
+        except ValueError:
+            return 0.0
+
+    @route("xai", "/xai/status", methods=["GET"])
+    def status(self, req, **kwargs):
+        app = self.app
+        return self._json({
+            "mode": app.mode, "switches": sorted(app.datapaths), "uptime_s": round(time.time() - app.started),
+            "poll_interval": C.POLL_INTERVAL, "tau_limit": C.TAU_LIMIT, "tau_block": C.TAU_BLOCK,
+            "persist": [C.PERSIST_K, C.PERSIST_N], "protected": sorted(C.PROTECTED_IPS),
+            "block_timeout": C.BLOCK_HARD_TIMEOUT, "rate_limit_kbps": C.RATE_LIMIT_KBPS,
+            "features": C.FEATURES, "classes": C.CLASSES,
+        })
+
+    @route("xai", "/xai/rounds", methods=["GET"])
+    def rounds(self, req, **kwargs):
+        since = self._since(req)
+        return self._json([r for r in self.app.rounds if r["ts"] > since])
+
+    @route("xai", "/xai/decisions", methods=["GET"])
+    def decisions(self, req, **kwargs):
+        since = self._since(req)
+        return self._json([d for d in self.app.decisions if d["ts"] > since])
+
+    @route("xai", "/xai/explain/{ip}", methods=["GET"])
+    def explain(self, req, ip, **kwargs):
+        view = self.app.explain_host(ip)
+        return self._json(view if view else {"error": f"no analysed traffic from {ip} yet"},
+                          200 if view else 404)
+
+    @route("xai", "/xai/mode", methods=["POST"])
+    def set_mode(self, req, **kwargs):
+        try:
+            mode = json.loads(req.body or b"{}").get("mode")
+        except ValueError:
+            mode = None
+        if mode not in ("detect", "monitor") or self.app.detector is None:
+            return self._json({"error": "mode must be 'detect' or 'monitor'"}, 400)
+        self.app.mode = mode
+        self.app.logger.info("mode changed to %s", mode)
+        return self._json({"mode": mode})
