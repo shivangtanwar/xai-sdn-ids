@@ -2,7 +2,9 @@
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
-RUN pip install "fastapi==0.115.6" "uvicorn[standard]==0.34.0" "httpx==0.28.1"
+# Plain uvicorn, not uvicorn[standard]: the `standard` extra pulls websockets/uvloop,
+# and this app streams over Server-Sent Events (StreamingResponse), never WebSockets.
+RUN pip install "fastapi==0.115.6" "uvicorn==0.34.0" "httpx==0.28.1"
 
 WORKDIR /srv
 COPY dashboard/ /srv/dashboard/
