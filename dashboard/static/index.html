@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>XAI-SDN-IDS · live</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/vendor/uPlot.min.css">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="top">
+    <div class="brand">
+      <h1>XAI-SDN-IDS</h1>
+      <span class="sub">Explainable intrusion detection with confidence-gated response</span>
+    </div>
+    <div class="health" aria-live="polite">
+      <span><i class="dot live" id="h-live"></i><span id="h-live-t">Connecting…</span></span>
+      <span><i class="dot" id="h-ctrl"></i>Ryu controller</span>
+      <span><i class="dot" id="h-bed"></i>Mininet testbed</span>
+      <span class="mono" id="h-sw">– switches</span>
+    </div>
+    <div class="spacer"></div>
+    <div class="protect">
+      <span>Automatic protection</span>
+      <button class="switch" id="protect" role="switch" aria-checked="true" aria-label="Automatic protection" disabled></button>
+    </div>
+    <div class="tabs" role="tablist">
+      <button role="tab" aria-selected="true" data-tab="live">Live</button>
+      <button role="tab" aria-selected="false" data-tab="results">Results</button>
+    </div>
+    <button class="btn" id="auth-btn">Sign in</button>
+  </div>
+
+  <div class="banner" id="banner" hidden></div>
+
+  <main id="tab-live">
+    <!-- Hero: one window travelling through the pipeline -->
+    <section class="card" aria-labelledby="pipe-title">
+      <div class="pipe-head">
+        <h2 id="pipe-title">Decision pipeline</h2>
+        <span class="when" id="pipe-when">Waiting for the first 2-second window…</span>
+        <label class="follow"><input type="checkbox" id="follow" checked> Follow the latest alert</label>
+      </div>
+      <div class="chips" id="host-chips" aria-label="Choose a host"></div>
+      <div class="rail" id="rail" aria-hidden="true"></div>
+      <div class="stations">
+        <div class="station" id="st-1">
+          <h3 class="plate">1 · Flow counters</h3>
+          <p class="lead">What the switches reported for this host in the last window.</p>
+          <dl class="kv" id="st-1-body"></dl>
+        </div>
+        <div class="station" id="st-2">
+          <h3 class="plate">2 · Features</h3>
+          <p class="lead">14 values computed from the counters. Bold = top SHAP drivers.</p>
+          <dl class="kv feat" id="st-2-body"></dl>
+        </div>
+        <div class="station" id="st-3">
+          <h3 class="plate">3 · Random Forest</h3>
+          <p class="lead">Share of 150 trees voting for each class.</p>
+          <div class="bars" id="st-3-body"></div>
+          <div class="thresh">Ticks: act at 0.70 · block at 0.90</div>
+        </div>
+        <div class="station" id="st-4">
+          <h3 class="plate">4 · SHAP explanation</h3>
+          <p class="lead" id="st-4-lead">Why the model chose this class.</p>
+          <div class="bars shap" id="st-4-body"></div>
+          <div class="legend-inline"><span><i style="background:var(--sup)"></i>supports</span><span><i style="background:var(--opp)"></i>argues against</span></div>
+        </div>
+        <div class="station" id="st-5">
+          <h3 class="plate">5 · Safety gates</h3>
+          <div class="gates" id="st-5-body"></div>
+        </div>
+        <div class="station" id="st-6">
+          <h3 class="plate">6 · Decision</h3>
+          <div id="st-6-body"></div>
+        </div>
+      </div>
+    </section>
+
+    <div class="grid-a">
+      <section class="card" aria-labelledby="topo-title">
+        <header><h2 class="plate" id="topo-title">Network</h2><span class="note">Select a host to inspect it. ↑ sent ↓ received in packets/s. Moving dashes = active traffic.</span></header>
+        <div id="topo"></div>
+      </section>
+      <section class="card" aria-labelledby="traffic-title">
+        <header><h2 class="plate" id="traffic-title">Packets sent per host</h2><span class="note">Up to the last 10 minutes · log scale · shaded = launched episode · red line = mitigation</span></header>
+        <div class="chart-wrap" id="traffic"></div>
+        <div class="flows-line" id="flows-line"></div>
+      </section>
+    </div>
+
+    <div class="grid-b">
+      <section class="card" aria-labelledby="feed-title">
+        <header><h2 class="plate" id="feed-title">Decision log</h2><span class="note">Every window the model classified as an attack, with its explanation and gate results</span></header>
+        <div class="feed">
+          <table>
+            <thead><tr><th>Time</th><th>Host</th><th>Prediction</th><th>Why (top SHAP features)</th><th>Gates</th><th>Action</th></tr></thead>
+            <tbody id="feed"></tbody>
+          </table>
+          <div class="empty" id="feed-empty">No attack-like traffic yet. Launch an attack from Controls to see the pipeline react.</div>
+        </div>
+      </section>
+      <div class="stack">
+        <section class="card" aria-labelledby="mit-title">
+          <header><h2 class="plate" id="mit-title">Active mitigations</h2><span class="note">Rules expire on their own</span></header>
+          <div class="mitig" id="mitig"></div>
+        </section>
+        <section class="card" aria-labelledby="ctl-title">
+          <header><h2 class="plate" id="ctl-title">Controls</h2></header>
+          <div class="locked" id="locked">Watching is open to everyone. Sign in to launch attacks or change protection. <button class="btn" data-signin>Sign in</button></div>
+          <div class="controls" id="controls" hidden>
+            <div class="row">
+              <label>Traffic<select id="c-type"></select></label>
+              <label>From<select id="c-src"></select></label>
+              <label>To<select id="c-dst"></select></label>
+              <label>Seconds<input id="c-dur" type="number" min="5" max="120" value="30"></label>
+            </div>
+            <div class="actions">
+              <button class="btn primary" id="c-launch">Launch</button>
+              <button class="btn" id="c-demo">Run guided demo</button>
+              <button class="btn danger" id="c-stop">Stop all traffic episodes</button>
+            </div>
+            <div class="msg" id="c-msg" role="status"></div>
+          </div>
+        </section>
+        <section class="card" aria-labelledby="ep-title">
+          <header><h2 class="plate" id="ep-title">Launched episodes</h2><span class="note">Measured live: time from launch to first detection and to mitigation</span></header>
+          <table>
+            <thead><tr><th>Start</th><th>Episode</th><th class="num">Detected</th><th class="num">Mitigated</th><th>Result</th></tr></thead>
+            <tbody id="episodes"></tbody>
+          </table>
+          <div class="empty" id="ep-empty">Nothing launched yet.</div>
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <main id="tab-results" hidden>
+    <section class="card">
+      <header><h2 class="plate">Offline evaluation</h2><span class="note">Trained on session train1, tested on the independent session test2</span></header>
+      <div class="results-grid">
+        <div>
+          <table id="r-models"></table>
+          <p class="caption">Macro averages over 5 classes. FPR and FNR treat the task as benign vs attack. Random Forest is deployed.</p>
+        </div>
+        <div><img class="fig" loading="lazy" src="/figures/confusion_matrix_rf.png" alt="Random Forest confusion matrix on the held-out session"></div>
+      </div>
+    </section>
+    <div class="results-grid">
+      <section class="card">
+        <header><h2 class="plate">Gating ablation</h2><span class="note">Replay of the held-out session through each policy</span></header>
+        <table id="r-ablation"></table>
+        <p class="caption">Attack sources (h4, h7) are excluded from "innocent hosts". Naive blocking cut off flood victims whose replies looked like floods. Gating removed every innocent-host block while stopping all 12 attacks.</p>
+      </section>
+      <section class="card">
+        <header><h2 class="plate">Per-class results</h2></header>
+        <table id="r-class"></table>
+      </section>
+    </div>
+    <section class="card">
+      <header><h2 class="plate">What drives each attack class</h2><span class="note">Mean |SHAP| on the held-out session; these confirm the gate G3 signatures</span></header>
+      <img class="fig" loading="lazy" src="/figures/shap_per_class.png" alt="Top SHAP features per attack class">
+    </section>
+  </main>
+
+  <dialog id="login">
+    <form method="dialog" id="login-form">
+      <h2>Sign in</h2>
+      <p>Signing in lets you launch attacks, release blocks and switch protection.</p>
+      <input type="password" id="pw" autocomplete="current-password" placeholder="Password" required>
+      <div class="msg err" id="pw-msg"></div>
+      <div class="actions">
+        <button type="button" class="btn" id="pw-cancel">Cancel</button>
+        <button type="submit" class="btn primary">Sign in</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/static/vendor/uPlot.iife.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

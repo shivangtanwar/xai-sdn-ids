@@ -1,0 +1,60 @@
+# Always-on deployment for the live dashboard (e.g. on gr19-remote):
+#   echo "DASHBOARD_PASSWORD=..." > .env && echo "SESSION_SECRET=$(openssl rand -hex 32)" >> .env
+#   docker compose -f docker-compose.live.yml up -d --build
+# Only the dashboard is published, and only on 127.0.0.1 (nginx terminates TLS in front of it).
+name: xai-live
+
+services:
+  controller:
+    build:
+      context: docker
+      dockerfile: controller.Dockerfile
+    image: xai-sdn-ids/controller
+    environment:
+      - XAI_IDS_MODE=detect
+      - XAI_FEATURE_LOG=off
+    volumes:
+      - ./:/app
+    restart: unless-stopped
+    networks: [sdn]
+
+  mininet:
+    build:
+      context: .
+      dockerfile: docker/mininet.Dockerfile
+    image: xai-sdn-ids/mininet
+    privileged: true
+    init: true
+    environment:
+      - SHELL=/bin/bash
+    volumes:
+      - ./:/app
+      - /lib/modules:/lib/modules:ro
+    command: ["python3", "traffic/live_runner.py"]
+    depends_on: [controller]
+    restart: unless-stopped
+    networks: [sdn]
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: docker/dashboard.Dockerfile
+    image: xai-sdn-ids/dashboard
+    environment:
+      - CONTROLLER_URL=http://controller:8080
+      - RUNNER_URL=http://mininet:9000
+      - PROJECT_DIR=/project
+      - DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD:?set DASHBOARD_PASSWORD in .env}
+      - SESSION_SECRET=${SESSION_SECRET:?set SESSION_SECRET in .env}
+      - SECURE_COOKIE=${SECURE_COOKIE:-1}
+    volumes:
+      - ./:/project:ro
+    ports:
+      - "127.0.0.1:${DASHBOARD_PORT:-8200}:8200"
+    depends_on: [controller, mininet]
+    restart: unless-stopped
+    networks: [sdn]
+
+networks:
+  sdn:
+    driver: bridge
