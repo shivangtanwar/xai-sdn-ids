@@ -32,6 +32,8 @@ class FeatureExtractor:
         self.interval = interval
         self._prev = {}          # flow key -> (packets, bytes)
         self._pktin = defaultdict(int)
+        self.inbound = {}        # dst ip -> pkts/s received (last window), for monitoring
+        self.flows_per_switch = {}
 
     def count_packet_in(self, src_ip):
         self._pktin[src_ip] += 1
@@ -48,6 +50,10 @@ class FeatureExtractor:
             is_new = prev is None
             dp = r.packets - (prev[0] if prev else 0)
             db = r.bytes - (prev[1] if prev else 0)
+            if is_new and r.duration > 3 * self.interval:
+                # rule existed before we started watching (e.g. controller restart):
+                # its counters are a lifetime total, not this window's traffic
+                dp, db, is_new = 0, 0, False
             if dp < 0:   # flow was re-installed and counters reset
                 dp, db, is_new = r.packets, r.bytes, True
             current[r.key] = (r.packets, r.bytes)
@@ -61,9 +67,15 @@ class FeatureExtractor:
                 best[src] = (total, dpid, rows)
 
         pktin, self._pktin = self._pktin, defaultdict(int)
-        out = {}
+        out, inbound = {}, defaultdict(float)
         for src, (_total, dpid, rows) in best.items():
             out[src] = {"dpid": dpid, "features": self._aggregate(rows, pktin.get(src, 0))}
+            for rec, dp, _db, _new in rows:
+                inbound[rec.dst] += dp / self.interval
+        self.inbound = dict(inbound)
+        self.flows_per_switch = defaultdict(int)
+        for r in records:
+            self.flows_per_switch[r.dpid] += 1
         return out
 
     def _aggregate(self, rows, pktin_count):

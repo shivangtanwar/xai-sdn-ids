@@ -1,5 +1,6 @@
 """Loads the trained classifier bundle and scores feature vectors."""
 import os
+import warnings
 
 import joblib
 import numpy as np
@@ -16,6 +17,8 @@ class Detector:
         # One window at a time: a parallel thread pool per call costs far more than it saves.
         if hasattr(self.model, "n_jobs"):
             self.model.n_jobs = 1
+        # The model was fitted on a DataFrame; plain arrays at inference are intended.
+        warnings.filterwarnings("ignore", message="X does not have valid feature names")
         self.features = bundle["features"]
         self.classes = list(self.model.classes_)
 

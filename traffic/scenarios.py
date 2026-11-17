@@ -12,6 +12,7 @@ import argparse
 import csv
 import os
 import random
+import signal
 import sys
 import time
 
@@ -97,17 +98,32 @@ def stop(procs):
             pass
 
 
+def start_episode(host, cmd, duration):
+    """Start an episode command on a Mininet host, hard-limited to `duration` seconds.
+
+    mnexec -d makes the process a session/group leader and `exec timeout` keeps that
+    pid, so the episode and everything it spawns (looping nmap, hping3) share one
+    process group that can be killed without touching the host's background traffic."""
+    quoted = cmd.replace("'", "'\\''")
+    return host.popen(f"exec timeout -s KILL {duration} bash -c '{quoted}'", shell=True)
+
+
+def kill_episode(proc):
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    proc.wait()
+
+
 def run_episode(net, writer, label, src, dst, cmd, duration):
     info(f"*** [{label}] {src} -> {dst} for {duration}s: {cmd}\n")
     h = net.get(src)
-    # `timeout` signals its whole process group, so looping commands (while true; nmap)
-    # cannot outlive the episode and pollute the next "benign" windows.
-    quoted = cmd.replace("'", "'\\''")
     start = time.time()
-    proc = h.popen(f"timeout -s KILL {duration} bash -c '{quoted}'", shell=True)
+    proc = start_episode(h, cmd, duration)
     proc.wait()
     end = time.time()
-    h.cmd("pkill -9 -f hping3; pkill -9 -f nmap; pkill -9 -f 'iperf3 -c'")
+    kill_episode(proc)
     writer.writerow([ip(src), label, f"{start:.3f}", f"{end:.3f}"])
 
 

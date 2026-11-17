@@ -33,6 +33,14 @@ class FeatureExtractorTest(unittest.TestCase):
         self.assertAlmostEqual(w["features"]["pktin_rate"], 0.5)
         self.assertEqual(w["features"]["new_flows"], 0)
 
+    def test_preexisting_rule_is_not_a_spike(self):
+        fx = FeatureExtractor(interval=2.0)
+        # first sighting of a rule that has existed for 5 minutes (controller restart)
+        out = fx.compute([FlowRecord(2, "10.0.0.1", "10.0.0.5", 6, None, 80, 900000, 9e7, 300.0)])
+        self.assertEqual(out["10.0.0.1"]["features"]["pkt_rate"], 0)
+        out = fx.compute([FlowRecord(2, "10.0.0.1", "10.0.0.5", 6, None, 80, 900020, 9e7 + 2000, 302.0)])
+        self.assertAlmostEqual(out["10.0.0.1"]["features"]["pkt_rate"], 10.0)
+
     def test_scan_shape(self):
         fx = FeatureExtractor(interval=2.0)
         recs = [FlowRecord(2, "10.0.0.7", "10.0.0.6", 6, None, p, 1, 60, 0.1) for p in range(1, 201)]
